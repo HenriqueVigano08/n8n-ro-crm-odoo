@@ -1,0 +1,1115 @@
+{
+  "name": "Registro de Oportunidades - Sincronização com CRM Odoo",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "output": "raw",
+        "filters": {
+          "foldersToInclude": [
+            "ID_DA_PASTA_OUTLOOK"
+          ]
+        },
+        "options": {
+          "downloadAttachments": false
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlookTrigger",
+      "typeVersion": 1,
+      "position": [
+        96,
+        912
+      ],
+      "id": "0b62491b-8209-4578-8bc8-c49d1c118871",
+      "name": "Microsoft Outlook Trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "function parseMail($json) {\nconst subject = $json.subject || '';\nconst body = $json.body?.content || '';\nconst preview = $json.bodyPreview || '';\nconst from = $json.from || '';\n\nconst texto = `${subject}\\n${body}\\n${preview}`;\n\nconst textoLimpo = texto\n  .replace(/<[^>]*>/g, ' ').replace(/&nbsp;|&#160;/gi,' ').replace(/&amp;/gi,'&').replace(/\\[([^\\]]+)\\]\\([^)]*\\)/g,'$1').replace(/\\*\\*/g,'')\n  .replace(/\\s+/g, ' ')\n  .trim();\n\n// MOTIVO DA NEGACAO\nconst motivoNegacaoRaw =\n  texto.match(/Motivo da nega[cç][aã]o\\s*:?\\s*(.*?)(?=Detalhes da nega[cç][aã]o|Nome da Conta do Parceiro|Deal Type|Total Expected Revenue|$)/is)?.[1] ||\n  texto.match(/Reason for rejection\\s*:?\\s*(.*?)(?=Rejection details|Partner Account Name|Deal Type|Total Expected Revenue|$)/is)?.[1] ||\n  '';\n\nconst motivoNegacao = motivoNegacaoRaw\n  .replace(/\\s+/g, ' ')\n  .replace(/<[^>]*>/g,' ').replace(/^[:\\s]*/, '')\n  .trim();\n\n\nfunction extract(regex) {\n  const match = textoLimpo.match(regex);\n  return match ? match[1].trim() : '';\n}\n\nfunction normalizar(texto) {\n  return (texto || '')\n    .toLowerCase()\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '');\n}\n\n// STATUS\nconst subjectLower = subject.toLowerCase();\n\nlet status = 'Não identificado';\n\nif (\n  subjectLower.includes('rejeitada') ||\n  subjectLower.includes('rejected')\n) {\n  status = 'Rejeitada';\n} else if (\n  subjectLower.includes('approved deal is about to expire') ||\n  subjectLower.includes('about to expire') ||\n  subjectLower.includes('expire')\n) {\n  status = 'Expirando';\n} else if (/renovad[ao]|renova[çc][aã]o|renewed|renewal/i.test(subject)) {\n  status = 'Renovada';\n} else if (\n  subjectLower.includes('oportunidade atualizada') ||\n  subjectLower.includes('updated')\n) {\n  status = 'Atualizada';\n} else if (\n  subjectLower.includes('aprovada') ||\n  subjectLower.includes('approved')\n) {\n  status = 'Aprovada';\n}\n\n\n// R.O\nconst numeroOportunidade =\n  extract(/n[uú]mero da oportunidade[:\\s]*([0-9]+)/i) ||\n  extract(/Deal ID[:\\s]*([0-9]+)/i);\n\n// NOME DA OPORTUNIDADE / RAZÃO SOCIAL\nconst nomeOportunidade =\n  extract(/Opportunity Name[:\\s]*(.*?)(?=\\s+Partner Program Track|\\s+Plano do|\\s+Plan|\\s+Deal|\\s*$)/i) ||\n  extract(/Nome da oportunidade[:\\s]*(.*?)(?=\\s+Partner Program Track|\\s+Plano do|\\s+Plan|\\s+Deal|\\s*$)/i) ||\n  '';\n\nconst partesNome = nomeOportunidade.split('|').map(p => p.trim());\nconst razaoSocial = partesNome[0] || '';\n\n// CÓDIGO DE REFERÊNCIA DE RENOVAÇÃO (REF)\n// Ao renovar um R.O já existente, o vendedor inclui no \"Opportunity Name\" do portal Dell\n// o texto REF:<numero do R.O atual no CRM>. Ex: CLIENTE | Vendedor | 03x R660 REF:32081947\nconst roReferencia = nomeOportunidade.match(/\\bREF\\s*[:\\-]?\\s*([0-9]{5,})/i)?.[1] || '';\nconst isRenovacaoExplicita = !!roReferencia && roReferencia !== numeroOportunidade;\n\n// VENDEDORES\nconst mapaVendedores = {\n  \"Ana Souza\": { id: 101, email: \"ana.souza@empresa.example\" },\n  \"Bruno Lima\": { id: 102, email: \"bruno.lima@empresa.example\" },\n  \"Carla Mendes\": { id: 103, email: \"carla.mendes@empresa.example\" }\n};\n\nconst textoNormalizado = normalizar(`${nomeOportunidade} ${subject}`);\n\nlet nomeVendedor = '';\n\nconst nomesOrdenados = Object.keys(mapaVendedores).sort((a, b) => b.length - a.length);\n\nfor (const nome of nomesOrdenados) {\n  const nomeNormalizado = normalizar(nome);\n  const regex = new RegExp(`\\\\b${nomeNormalizado}\\\\b`);\n\n  if (regex.test(textoNormalizado)) {\n    nomeVendedor = nome;\n    break;\n  }\n}\n\nif (!nomeVendedor) {\n  nomeVendedor = 'Ana Souza'; // vendedor padrão quando nenhum nome é identificado\n}\n\nconst vendedor = mapaVendedores[nomeVendedor];\nconst vendedorId = vendedor.id;\nconst vendedorEmail = vendedor.email;\n\nconst nomeCliente = `${razaoSocial} | ${nomeVendedor} | R.O ${numeroOportunidade}`;\n\n// RECEITA USD → BRL\nconst valorDolarTexto =\n  textoLimpo.match(/Total\\s*Expected\\s*Revenue[:\\s]*([0-9.,]+)/i)?.[1] || '';\n\nconst valorDolar = valorDolarTexto\n  ? Number(valorDolarTexto.replace(',', '.'))\n  : 0;\n\nconst cotacaoDolar = 5.20;\nconst expectedRevenue = Number((valorDolar * cotacaoDolar).toFixed(2));\n\n// LOB\nconst produtosCSG = [\n  'Dell Pro',\n  'Latitude',\n  'Accessories',\n  'Dell Tower',\n  'Monitor',\n  'Ultrasharp',\n  'Dell 22',\n  'Dell 24',\n  'Dell'\n];\n\nconst produtosISG = [\n  'PowerEdge',\n  'PowerVault',\n  'Networking',\n  'PowerStore',\n  'E3248P',\n  'R',\n  'ME',\n  'APC',\n  'XE',\n  'Z-Series',\n  'PowerScale',\n  'Unity'\n];\n\nconst textoProdutos = nomeOportunidade.toLowerCase();\n\nconst encontrouISG = /\\b(poweredge|powervault|powerstore|powerscale|unity|networking|r\\d{3,4}|xe\\d{3,4}|me\\d{3,4})\\b/i.test(textoProdutos);\nconst encontrouCSG = /\\b(dell pro|latitude|precision|optiplex|alienware|vostro|inspiron|monitor|ultrasharp|notebook|desktop|csg)\\b/i.test(textoProdutos);\nlet lob = encontrouISG ? 'ISG-Storage,Server,Network' : encontrouCSG ? 'CSG-Notebook,Desktops' : '';\n// DATA EXPIRAÇÃO\nconst dataExpiracaoTexto =\n  extract(/Deal Expiration Date[:\\s]*(\\d{1,2}\\/\\d{1,2}\\/\\d{4})/i) ||\n  extract(/Deal Expiration Date[:\\s]*([A-Za-z]{3}\\s+[A-Za-z]{3}\\s+\\d{1,2}\\s+\\d{2}:\\d{2}:\\d{2}\\s+GMT\\s+\\d{4})/i) ||\n  extract(/Data de expira[çc][aã]o do Registro de Oportunidade[:\\s]*([A-Za-z]{3}\\s+[A-Za-z]{3}\\s+\\d{1,2}\\s+\\d{2}:\\d{2}:\\d{2}\\s+GMT\\s+\\d{4})/i);\n\nfunction formatarDataOdoo(dataTexto) {\n  if (!dataTexto) return false;\n\n  const data = new Date(dataTexto);\n\n  if (isNaN(data.getTime())) return false;\n\n  return data.toISOString().slice(0, 10);\n}\n\nconst dataExpiracaoOdoo = formatarDataOdoo(dataExpiracaoTexto);\n\n// MARCADOR GOVERNO / EMPRESA PRIVADA\nconst razaoSocialNormalizada = normalizar(razaoSocial);\n\nconst nomesPessoas = [\n  'ana', 'bruno', 'carla'\n];\n\nconst termosGoverno = [\n  'fapesp',\n  'funcate',\n  'funcamp',\n  'organizacao',\n  'sesi',\n  'senar',\n  \n];\n\nconst termosEmpresaPrivada = [\n  'ltda',\n  'me',\n  'sa',\n  's.a',\n  'epp',\n  'ind',\n  'grupo'\n];\n\nconst iniciaComNomePessoa = nomesPessoas.some(nome =>\n  razaoSocialNormalizada.startsWith(nome)\n);\n\nconst contemTermoGoverno = termosGoverno.some(termo =>\n  razaoSocialNormalizada.includes(termo)\n);\n\nconst contemTermoEmpresaPrivada = termosEmpresaPrivada.some(termo =>\n  razaoSocialNormalizada.includes(termo)\n);\n\nlet marcadorCliente = 'Empresa Privada';\n\nif (contemTermoGoverno || iniciaComNomePessoa) {\n  marcadorCliente = 'Governo';\n} else if (contemTermoEmpresaPrivada) {\n  marcadorCliente = 'Empresa Privada';\n}\n\nconst cicloMaximoRenovacao = marcadorCliente === 'Governo' ? 999 : 2;\n\n// TROQUE PELOS IDS REAIS DAS TAGS NO ODOO\nconst tagIdGoverno = 1;\nconst tagIdEmpresaPrivada = 2;\n\nconst tagId = marcadorCliente === 'Governo'\n  ? tagIdGoverno\n  : tagIdEmpresaPrivada;\n\nif (!numeroOportunidade || status === 'Não identificado') return [];\nconst numeroRoAnterior = extract(/(?:R\\.?O\\.? anterior|Previous Deal ID)[:\\s]*([0-9]+)/i);\n// FLAGS PARA IF\nconst isCriar = status === 'Aprovada' || status === 'Renovada';\nconst isAtualizar = status === 'Atualizada' || status === 'Expirando';\nconst isRejeitada = status === 'Rejeitada';\n\nreturn [\n  {\n    json: {\n      numeroRoAnterior,\n      descricao: textoLimpo,\n      messageId: $json.id,\n      conversationId: $json.conversationId,\n      subject,\n      from,\n      bodyPreview: preview,\n      status,\n      isCriar,\n      isAtualizar,\n      isRejeitada,\n      numeroOportunidade,\n      nomeOportunidade,\n      roReferencia,\n      isRenovacaoExplicita,\n      razaoSocial,\n      nomeCliente,\n      nomeVendedor,\n      vendedorId,\n      vendedorEmail,\n      valorDolarTexto,\n      valorDolar,\n      cotacaoDolar,\n      expectedRevenue,\n      lob,\n      dataExpiracaoTexto,\n      dataExpiracaoOdoo,\n      marcadorCliente,\n      cicloMaximoRenovacao,\n      tagId,\n      motivoNegacao,\n      \n    }\n  }\n];\n}\nconst itens = $input.all().flatMap((item,index)=>parseMail(item.json).map(out=>({...out,pairedItem:{item:index}})));\n\n// DEDUPLICAÇÃO NO LOTE: se chegarem 2+ e-mails do mesmo R.O na mesma execução,\n// processa apenas um (prioriza o de criação) para não criar oportunidades duplicadas.\nconst porRo = new Map();\nfor (const it of itens) {\n  const atual = porRo.get(it.json.numeroOportunidade);\n  if (!atual || (!atual.json.isCriar && it.json.isCriar)) porRo.set(it.json.numeroOportunidade, it);\n}\nreturn [...porRo.values()];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        272,
+        912
+      ],
+      "id": "a4640adf-ba17-4655-ab67-d2e0be97027f",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "1f304e01-5155-4021-a2b8-636d54a3fb76",
+              "leftValue": "={{ $json.isCriar || $json.isAtualizar }}",
+              "rightValue": "={{ true }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        464,
+        912
+      ],
+      "id": "3259f612-4dcb-4350-9631-1afb6fffc65c",
+      "name": "Status Oportunidade"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://seu-odoo.example.com/jsonrpc",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ (() => { const ro=String($(\"Code in JavaScript\").item.json.numeroOportunidade || \"\"); if(!/^\\d+$/.test(ro)) throw new Error(\"RO invalida\"); return {jsonrpc:\"2.0\",method:\"call\",params:{service:\"object\",method:\"execute_kw\",args:[\"NOME_DO_BANCO_ODOO\",11,$env.ODOO_API_KEY,\"crm.lead\",\"search_read\",[[\"|\",[\"x_studio_ro_1\",\"=\",ro],[\"name\",\"ilike\",ro]]],{fields:[\"id\",\"name\",\"active\",\"x_studio_ro_1\",\"user_id\"],context:{active_test:false},order:\"active desc,id desc\",limit:20}]},id:1}; })() }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        736,
+        896
+      ],
+      "id": "7bbae3b9-ae4b-4f3b-9959-61ecd0cef252",
+      "name": "Buscar CRM por R.O"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://seu-odoo.example.com/jsonrpc",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ (() => { const d=$(\"Code in JavaScript\").item.json; const r=$(\"Buscar CRM por R.O\").item.json.result?.[0]; if(!r?.id || !r.active) throw new Error(\"Registro ativo nao encontrado\"); const v={x_studio_ro_1:d.numeroOportunidade}; if(d.isCriar)v.x_studio_status_ro_1=\"Ativa\"; if(d.dataExpiracaoOdoo)v.x_studio_vencimento_de_ro=d.dataExpiracaoOdoo; if(d.lob)v.x_studio_lob=d.lob; return {jsonrpc:\"2.0\",method:\"call\",params:{service:\"object\",method:\"execute_kw\",args:[\"NOME_DO_BANCO_ODOO\",11,$env.ODOO_API_KEY,\"crm.lead\",\"write\",[[r.id],v]]},id:1}; })() }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1824,
+        720
+      ],
+      "id": "9d06b5f1-af0c-48e4-a20d-f44786232f11",
+      "name": "Update crm"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "0aea4099-dba6-4f56-9444-a46fa990fa1c",
+              "leftValue": "={{ ($('Buscar CRM por R.O').item.json.result || $('Buscar CRM por R.O').item.json.result || []).length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1168,
+        896
+      ],
+      "id": "d9e80994-9ce4-4b95-bc15-3fab4ed83993",
+      "name": "Existe R.O no CRM ?"
+    },
+    {
+      "parameters": {
+        "content": "Notifica o vendedor quando R.O é negado ",
+        "height": 272,
+        "width": 310,
+        "color": 3
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1232,
+        1104
+      ],
+      "typeVersion": 1,
+      "id": "88223cf8-3b8c-41bd-a48f-46998fd96292",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "Se a oportunidade existir node solicita a atualização da mesma no CRM ",
+        "height": 240,
+        "width": 550
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1664,
+        656
+      ],
+      "typeVersion": 1,
+      "id": "cf07e25f-02e7-4128-8c74-b9971aeaf66d",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "Renovação por código REF: se o nome da oportunidade traz REF:<R.O atual>, localiza a oportunidade existente no CRM e troca o R.O antigo pelo novo (write), sem criar outra. Sem REF, segue para criação de oportunidade nova.",
+        "height": 192,
+        "width": 1606
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1664,
+        896
+      ],
+      "typeVersion": 1,
+      "id": "a0199801-44da-4d9a-875f-b517bd0d01a5",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://seu-odoo.example.com/jsonrpc",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"service\": \"object\",\n    \"method\": \"execute_kw\",\n    \"args\": [\n      \"NOME_DO_BANCO_ODOO\",\n      11,\n      {{ JSON.stringify($env.ODOO_API_KEY) }},\n      \"crm.lead\",\n      \"create\",\n      [\n        {\n          \"type\": \"opportunity\",\n          \"name\": {{ JSON.stringify($('Code in JavaScript').item.json.nomeCliente || '') }},\n          \"partner_name\": {{ JSON.stringify($('Code in JavaScript').item.json.nomeCliente || '') }},\n          \"user_id\": {{ $('Code in JavaScript').item.json.vendedorId || 11 }},\n          \"expected_revenue\": {{ $('Code in JavaScript').item.json.expectedRevenue || 0 }},\n          \"probability\": 10,\n          \"description\": {{ JSON.stringify($('Code in JavaScript').item.json.descricao || '') }},\n          \"x_studio_ro_1\": {{ JSON.stringify($('Code in JavaScript').item.json.numeroOportunidade || '') }},\n          \"x_studio_lob\": {{ JSON.stringify($('Code in JavaScript').item.json.lob || false) }},\n          \"x_studio_vencimento_de_ro\": {{ JSON.stringify($('Code in JavaScript').item.json.dataExpiracaoOdoo || false) }},\n          \"x_studio_status_ro_1\": \"Ativa\",\n          \"x_studio_ro_anterior\": \"\",\n          \"x_studio_qtd_de_renovacoes\": 0,\n          \"x_studio_many2many_field_cXI93\": [[6, 0, [{{ $('Code in JavaScript').item.json.tagId }}]]]\n        }\n      ]\n    ]\n  },\n  \"id\": 1\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2944,
+        1168
+      ],
+      "id": "04c6e807-995b-4029-b8c3-3f3364196ab2",
+      "name": "Criar CRM com partner_name"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://seu-odoo.example.com/jsonrpc",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"service\": \"object\",\n    \"method\": \"execute_kw\",\n    \"args\": [\n      \"NOME_DO_BANCO_ODOO\",\n      11,\n      {{ JSON.stringify($env.ODOO_API_KEY) }},\n      \"res.users\",\n      \"search_read\",\n      [\n        [\n          [\"id\", \"=\", {{ Number($('Code in JavaScript').item.json.vendedorId) }}]\n        ]\n      ],\n      {\n        \"fields\": [\"id\", \"name\"],\n        \"limit\": 1\n      }\n    ]\n  },\n  \"id\": 1\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2560,
+        1168
+      ],
+      "id": "8caf73e4-3e6d-40c0-a164-8ac0b6bc5639",
+      "name": "Buscar vendedor1"
+    },
+    {
+      "parameters": {
+        "content": "Gatilho por e-mail pasta R.O com Code tratando todas informações recebidas, trabalha o registro no CRM para ver se existe já alguma numeração parecida se sim manda atualizar se não manda verificar R.Os anteriores \n\n\n",
+        "height": 256,
+        "width": 1600
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        48,
+        848
+      ],
+      "typeVersion": 1,
+      "id": "f6bc414a-5582-4b2d-b045-0834cc23b329",
+      "name": "Sticky Note3"
+    },
+    {
+      "parameters": {
+        "toRecipients": "={{ $('Code in JavaScript').item.json.vendedorEmail }}",
+        "subject": "=Status de Oportunidade {{ $('Code in JavaScript').item.json.nomeCliente }} R.O {{ $('Code in JavaScript').item.json.numeroOportunidade }}",
+        "bodyContent": "=<div style=\"margin:0;padding:0;background:#f4f5f6;font-family:Arial,Helvetica,sans-serif;\">\n  <table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" style=\"background:#f4f5f6;\">\n    <tr>\n      <td align=\"center\" style=\"padding:24px 12px;\">\n\n        <!--[if mso]>\n        <table role=\"presentation\" width=\"640\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\"><tr><td>\n        <![endif]-->\n\n        <table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" style=\"width:100%;max-width:640px;background:#ffffff;border-radius:18px;border-spacing:0;overflow:hidden;\">\n\n          <tr>\n            <td align=\"center\" style=\"padding:0;font-size:0;line-height:0;border-radius:18px 18px 0 0;\">\n              <img\n                src=\"https://example.com/imagens/banner.png\"\n                alt=\"Empresa Exemplo\"\n                width=\"640\"\n                border=\"0\"\n                style=\"display:block;width:100%;max-width:640px;height:auto;border:0;border-radius:18px 18px 0 0;\"\n              >\n            </td>\n          </tr>\n\n          <tr>\n            <td style=\"padding:30px 24px 32px;\">\n              <h1 style=\"margin:0;color:#042222;font-size:24px;line-height:32px;font-weight:bold;text-align:center;\">\n                Oportunidade Rejeitada\n              </h1>\n\n              <p style=\"margin:18px 0 24px;color:#042222;font-size:15px;line-height:24px;text-align:left;\">\n                <strong>{{ $('Code in JavaScript').item.json.nomeVendedor }}</strong>,\n                aproveite para reforçar a validação diretamente com seu gestor e nosso time de Registro.\n              </p>\n\n              <table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" style=\"width:100%;table-layout:fixed;border:1px solid #e2e8e7;border-radius:10px;border-collapse:separate;border-spacing:0;overflow:hidden;text-align:left;\">\n                <tr>\n                  <th scope=\"row\" width=\"32%\" valign=\"top\" style=\"width:32%;padding:16px 12px;background:#f5f8f7;border-radius:9px 0 0 0;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Cliente:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-radius:0 9px 0 0;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    {{ $('Code in JavaScript').item.json.razaoSocial }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    R.O:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;font-weight:bold;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    {{ $('Code in JavaScript').item.json.numeroOportunidade }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Vendedor:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    {{ $('Code in JavaScript').item.json.nomeVendedor }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Receita Esperada:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:16px;line-height:24px;text-align:left;font-weight:bold;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    R$ {{ $('Code in JavaScript').item.json.expectedRevenue }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Status:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-bottom:1px solid #e2e8e7;color:#042222;text-align:left;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    <span style=\"display:inline-block;padding:4px 10px;background:#e4eeeb;border:1px solid #cdded8;border-radius:6px;color:#042222;font-size:13px;line-height:20px;font-weight:bold;\">\n                      {{ $('Code in JavaScript').item.json.status }}\n                    </span>\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-radius:0 0 0 9px;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Motivo da Negação:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-radius:0 0 9px 0;color:#042222;font-size:14px;line-height:22px;text-align:left;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    {{ $('Code in JavaScript').item.json.motivoNegacao || 'Não identificado' }}\n                  </td>\n                </tr>\n              </table>\n            </td>\n          </tr>\n\n          <tr>\n            <td align=\"center\" bgcolor=\"#042222\" style=\"padding:22px 24px;background:#042222;border-radius:0 0 18px 18px;text-align:center;\">\n              <p style=\"margin:0;color:#ffffff;font-size:13px;line-height:20px;\">Empresa Exemplo</p>\n              <p style=\"margin:4px 0 0;color:#ffffff;font-size:15px;line-height:22px;font-weight:bold;\">Alerta interno</p>\n              <p style=\"margin:12px 0 0;color:#d3e2de;font-size:12px;line-height:19px;\">Telefone: (11) 0000-0000</p>\n              <p style=\"margin:4px 0 0;color:#d3e2de;font-size:12px;line-height:19px;\">Para mais informações, fale com seu gestor.</p>\n            </td>\n          </tr>\n\n        </table>\n\n        <!--[if mso]>\n        </td></tr></table>\n        <![endif]-->\n\n      </td>\n    </tr>\n  </table>\n</div>",
+        "additionalFields": {
+          "ccRecipients": "gerente.comercial@empresa.example,automacoes@empresa.example,registros@empresa.example",
+          "from": "no-reply@empresa.example",
+          "bodyContentType": "html"
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        1344,
+        1200
+      ],
+      "id": "1e38abf6-04b0-42df-bd7b-855c30a34e73",
+      "name": "Send a message",
+      "webhookId": "635c847d-7b11-4a7b-ac67-6066b6dc8ba9"
+    },
+    {
+      "parameters": {
+        "toRecipients": "={{ $('Code in JavaScript').item.json.vendedorEmail }}",
+        "subject": "=Status de Oportunidade {{ $('Code in JavaScript').item.json.nomeCliente }} R.O{{ $('Code in JavaScript').item.json.numeroOportunidade }}",
+        "bodyContent": "=<div style=\"margin:0;padding:0;background:#f4f5f6;font-family:Arial,Helvetica,sans-serif;\">\n  <table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" style=\"background:#f4f5f6;\">\n    <tr>\n      <td align=\"center\" style=\"padding:24px 12px;\">\n\n        <!--[if mso]>\n        <table role=\"presentation\" width=\"640\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\"><tr><td>\n        <![endif]-->\n\n        <table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" style=\"width:100%;max-width:640px;background:#ffffff;border-radius:18px;border-spacing:0;overflow:hidden;\">\n\n          <tr>\n            <td align=\"center\" style=\"padding:0;font-size:0;line-height:0;border-radius:18px 18px 0 0;\">\n              <img\n                src=\"https://example.com/imagens/banner.png\"\n                alt=\"Empresa Exemplo\"\n                width=\"640\"\n                border=\"0\"\n                style=\"display:block;width:100%;max-width:640px;height:auto;border:0;border-radius:18px 18px 0 0;\"\n              >\n            </td>\n          </tr>\n\n          <tr>\n            <td style=\"padding:30px 24px 32px;\">\n              <h1 style=\"margin:0;color:#042222;font-size:24px;line-height:32px;font-weight:bold;text-align:center;\">\n                Oportunidade Criada no CRM\n              </h1>\n\n              <p style=\"margin:18px 0 24px;color:#042222;font-size:15px;line-height:24px;text-align:left;\">\n                <strong>{{ $('Code in JavaScript').item.json.nomeVendedor }}</strong>,\n                Verificar e seguir com os updates necessarios\n              </p>\n\n              <table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" style=\"width:100%;table-layout:fixed;border:1px solid #e2e8e7;border-radius:10px;border-collapse:separate;border-spacing:0;overflow:hidden;text-align:left;\">\n                <tr>\n                  <th scope=\"row\" width=\"32%\" valign=\"top\" style=\"width:32%;padding:16px 12px;background:#f5f8f7;border-radius:9px 0 0 0;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Cliente:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-radius:0 9px 0 0;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    {{ $('Code in JavaScript').item.json.razaoSocial }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    R.O:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;font-weight:bold;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    {{ $('Code in JavaScript').item.json.numeroOportunidade }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Vendedor:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    {{ $('Code in JavaScript').item.json.nomeVendedor }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Receita Esperada:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:16px;line-height:24px;text-align:left;font-weight:bold;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    R$ {{ $('Code in JavaScript').item.json.expectedRevenue }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-radius:0 0 0 9px;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Status:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-radius:0 0 9px 0;color:#042222;text-align:left;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    <span style=\"display:inline-block;padding:4px 10px;background:#e4eeeb;border:1px solid #cdded8;border-radius:6px;color:#042222;font-size:13px;line-height:20px;font-weight:bold;\">\n                      {{ $('Code in JavaScript').item.json.status }}\n                    </span>\n                  </td>\n                </tr>\n              </table>\n            </td>\n          </tr>\n\n          <tr>\n            <td align=\"center\" bgcolor=\"#042222\" style=\"padding:22px 24px;background:#042222;border-radius:0 0 18px 18px;text-align:center;\">\n              <p style=\"margin:0;color:#ffffff;font-size:13px;line-height:20px;\">Empresa Exemplo</p>\n              <p style=\"margin:4px 0 0;color:#ffffff;font-size:15px;line-height:22px;font-weight:bold;\">Alerta interno</p>\n              <p style=\"margin:12px 0 0;color:#d3e2de;font-size:12px;line-height:19px;\">Telefone: (11) 0000-0000</p>\n              <p style=\"margin:4px 0 0;color:#d3e2de;font-size:12px;line-height:19px;\">Para mais informações, fale com seu gestor.</p>\n            </td>\n          </tr>\n\n        </table>\n\n        <!--[if mso]>\n        </td></tr></table>\n        <![endif]-->\n\n      </td>\n    </tr>\n  </table>\n</div>",
+        "additionalFields": {
+          "ccRecipients": "gerente.comercial@empresa.example,automacoes@empresa.example,registros@empresa.example",
+          "from": "no-reply@empresa.example",
+          "bodyContentType": "html"
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        3376,
+        1168
+      ],
+      "id": "d8129305-0ca9-4504-9adb-72146fdddd0c",
+      "name": "Send a message1",
+      "webhookId": "bddf02fa-60ca-43f0-814b-3d9a204c4be2"
+    },
+    {
+      "parameters": {
+        "toRecipients": "={{ $('Code in JavaScript').item.json.vendedorEmail }}",
+        "subject": "=Status Cliente: {{ $('Code in JavaScript').item.json.nomeCliente }} R.O: {{ $('Code in JavaScript').item.json.numeroOportunidade }}",
+        "bodyContent": "=<div style=\"margin:0;padding:0;background:#f4f5f6;font-family:Arial,Helvetica,sans-serif;\">\n  <table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" style=\"background:#f4f5f6;\">\n    <tr>\n      <td align=\"center\" style=\"padding:24px 12px;\">\n\n        <!--[if mso]>\n        <table role=\"presentation\" width=\"640\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\"><tr><td>\n        <![endif]-->\n\n        <table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" style=\"width:100%;max-width:640px;background:#ffffff;border-radius:18px;border-spacing:0;overflow:hidden;\">\n\n          <tr>\n            <td align=\"center\" style=\"padding:0;font-size:0;line-height:0;border-radius:18px 18px 0 0;\">\n              <img\n                src=\"https://example.com/imagens/banner.png\"\n                alt=\"Empresa Exemplo\"\n                width=\"640\"\n                border=\"0\"\n                style=\"display:block;width:100%;max-width:640px;height:auto;border:0;border-radius:18px 18px 0 0;\"\n              >\n            </td>\n          </tr>\n\n          <tr>\n            <td style=\"padding:30px 24px 32px;\">\n              <h1 style=\"margin:0;color:#042222;font-size:24px;line-height:32px;font-weight:bold;text-align:center;\">\n                Oportunidade encontrada no CRM\n              </h1>\n\n              <p style=\"margin:18px 0 24px;color:#042222;font-size:15px;line-height:24px;text-align:left;\">\n                <strong>{{ $('Code in JavaScript').item.json.nomeVendedor }}</strong>,\n                Verificar e seguir com as atualizações necessarias\n              </p>\n\n              <table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" style=\"width:100%;table-layout:fixed;border:1px solid #e2e8e7;border-radius:10px;border-collapse:separate;border-spacing:0;overflow:hidden;text-align:left;\">\n                <tr>\n                  <th scope=\"row\" width=\"32%\" valign=\"top\" style=\"width:32%;padding:16px 12px;background:#f5f8f7;border-radius:9px 0 0 0;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Cliente:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-radius:0 9px 0 0;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    {{ $('Code in JavaScript').item.json.razaoSocial }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    R.O:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;font-weight:bold;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    {{ $('Code in JavaScript').item.json.numeroOportunidade }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Vendedor:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    {{ $('Code in JavaScript').item.json.nomeVendedor }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Receita Esperada:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:16px;line-height:24px;text-align:left;font-weight:bold;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    R$ {{ $('Code in JavaScript').item.json.expectedRevenue }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-radius:0 0 0 9px;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Status:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-radius:0 0 9px 0;color:#042222;text-align:left;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    <span style=\"display:inline-block;padding:4px 10px;background:#e4eeeb;border:1px solid #cdded8;border-radius:6px;color:#042222;font-size:13px;line-height:20px;font-weight:bold;\">\n                      {{ $('Code in JavaScript').item.json.status }}\n                    </span>\n                  </td>\n                </tr>\n              </table>\n            </td>\n          </tr>\n\n          <tr>\n            <td align=\"center\" bgcolor=\"#042222\" style=\"padding:22px 24px;background:#042222;border-radius:0 0 18px 18px;text-align:center;\">\n              <p style=\"margin:0;color:#ffffff;font-size:13px;line-height:20px;\">Empresa Exemplo</p>\n              <p style=\"margin:4px 0 0;color:#ffffff;font-size:15px;line-height:22px;font-weight:bold;\">Alerta interno</p>\n              <p style=\"margin:12px 0 0;color:#d3e2de;font-size:12px;line-height:19px;\">Telefone: (11) 0000-0000</p>\n              <p style=\"margin:4px 0 0;color:#d3e2de;font-size:12px;line-height:19px;\">Para mais informações, fale com seu gestor.</p>\n            </td>\n          </tr>\n\n        </table>\n\n        <!--[if mso]>\n        </td></tr></table>\n        <![endif]-->\n\n      </td>\n    </tr>\n  </table>\n</div>",
+        "additionalFields": {
+          "ccRecipients": "gerente.comercial@empresa.example,automacoes@empresa.example,registros@empresa.example",
+          "from": "no-reply@empresa.example",
+          "bodyContentType": "html"
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        2352,
+        720
+      ],
+      "id": "6ad23e86-3cf5-48ac-8a04-767252793e32",
+      "name": "Send a message2",
+      "webhookId": "6b4f648a-b6c1-490d-a820-4540792d5b92"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1936,
+        1232
+      ],
+      "id": "17242b9a-7994-40dc-998a-55c4c3d351e0",
+      "name": "No Operation, do nothing"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2624,
+        720
+      ],
+      "id": "8e8fc633-9673-451a-9f23-bebbe63713aa",
+      "name": "No Operation, do nothing1"
+    },
+    {
+      "parameters": {
+        "content": "quando não encontra cria um novo registro no CRM  para tratativa do vendedor ",
+        "height": 256,
+        "width": 1168
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        2112,
+        1088
+      ],
+      "typeVersion": 1,
+      "id": "25d445d1-c213-4f63-bb45-027f17977c4e",
+      "name": "Sticky Note4"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://seu-odoo.example.com/jsonrpc",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"service\": \"object\",\n    \"method\": \"execute_kw\",\n    \"args\": [\n      \"NOME_DO_BANCO_ODOO\",\n      11,\n      {{ JSON.stringify($env.ODOO_API_KEY) }},\n      \"crm.lead\",\n      \"fields_get\",\n      [\n        [\"x_studio_many2many_field_cXI93\"]\n      ],\n      {\n        \"attributes\": [\"string\", \"type\", \"relation\"]\n      }\n    ]\n  },\n  \"id\": 1\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        816,
+        416
+      ],
+      "id": "e3b45e08-d669-4247-b4a0-a7ed5262d1eb",
+      "name": "Descobrir Marcador"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://seu-odoo.example.com/jsonrpc",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"service\": \"object\",\n    \"method\": \"execute_kw\",\n    \"args\": [\n      \"NOME_DO_BANCO_ODOO\",\n      11,\n      {{ JSON.stringify($env.ODOO_API_KEY) }},\n      \"x_marcores\",\n      \"search_read\",\n      [\n        []\n      ],\n      {\n        \"fields\": [\"id\", \"display_name\"],\n        \"limit\": 50\n      }\n    ]\n  },\n  \"id\": 1\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1024,
+        416
+      ],
+      "id": "8da515f1-13c2-47b7-8648-892ec15009cc",
+      "name": "Listas Marcadores"
+    },
+    {
+      "parameters": {
+        "content": "Descobre Marcadores no CRM Odoo (Privado) ou (Governo)",
+        "height": 256,
+        "width": 912
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        608,
+        352
+      ],
+      "typeVersion": 1,
+      "id": "4c51cb46-3f19-4466-a682-d730d9ad3c11",
+      "name": "Sticky Note5"
+    },
+    {
+      "parameters": {
+        "content": "Notifica o vendedor para atualizar o registro",
+        "height": 240,
+        "width": 326,
+        "color": 3
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        2208,
+        656
+      ],
+      "typeVersion": 1,
+      "id": "b2bccf51-3033-4402-9193-08ca03a1b8e2",
+      "name": "Sticky Note6"
+    },
+    {
+      "parameters": {
+        "content": "Notifica o vendedor sobre registro criado ",
+        "height": 256,
+        "width": 262,
+        "color": 3
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        3280,
+        1088
+      ],
+      "typeVersion": 1,
+      "id": "f877cc7c-e1c6-4fc9-867e-bb5847f8cc7b",
+      "name": "Sticky Note7"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "1d587603-b000-4dc5-a84b-63ba14c3f727",
+              "leftValue": "={{ $('Code in JavaScript').item.json.isAtualizar }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1392,
+        976
+      ],
+      "id": "c77dbdba-81c7-4906-a96b-59fee6751190",
+      "name": "É atualização sem CRM?"
+    },
+    {
+      "parameters": {
+        "toRecipients": "={{ $('Code in JavaScript').item.json.vendedorEmail }}",
+        "subject": "=Status Cliente: {{ $('Code in JavaScript').item.json.nomeCliente }} R.O: {{ $('Code in JavaScript').item.json.numeroOportunidade }}",
+        "bodyContent": "=<div style=\"margin:0;padding:0;background:#f4f5f6;font-family:Arial,Helvetica,sans-serif;\">\n  <table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" style=\"background:#f4f5f6;\">\n    <tr>\n      <td align=\"center\" style=\"padding:24px 12px;\">\n\n        <!--[if mso]>\n        <table role=\"presentation\" width=\"640\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\"><tr><td>\n        <![endif]-->\n\n        <table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" style=\"width:100%;max-width:640px;background:#ffffff;border-radius:18px;border-spacing:0;overflow:hidden;\">\n\n          <tr>\n            <td align=\"center\" style=\"padding:0;font-size:0;line-height:0;border-radius:18px 18px 0 0;\">\n              <img\n                src=\"https://example.com/imagens/banner.png\"\n                alt=\"Empresa Exemplo\"\n                width=\"640\"\n                border=\"0\"\n                style=\"display:block;width:100%;max-width:640px;height:auto;border:0;border-radius:18px 18px 0 0;\"\n              >\n            </td>\n          </tr>\n\n          <tr>\n            <td style=\"padding:30px 24px 32px;\">\n              <h1 style=\"margin:0;color:#042222;font-size:24px;line-height:32px;font-weight:bold;text-align:center;\">\n                Oportunidade não encontrada no CRM e prestes a expirar\n              </h1>\n\n              <p style=\"margin:18px 0 24px;color:#042222;font-size:15px;line-height:24px;text-align:left;\">\n                <strong>{{ $('Code in JavaScript').item.json.nomeVendedor }}</strong>,\n                Verificar e seguir com os Trâmites necessarios.\n              </p>\n\n              <table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" style=\"width:100%;table-layout:fixed;border:1px solid #e2e8e7;border-radius:10px;border-collapse:separate;border-spacing:0;overflow:hidden;text-align:left;\">\n                <tr>\n                  <th scope=\"row\" width=\"32%\" valign=\"top\" style=\"width:32%;padding:16px 12px;background:#f5f8f7;border-radius:9px 0 0 0;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Cliente:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-radius:0 9px 0 0;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    {{ $('Code in JavaScript').item.json.razaoSocial }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    R.O:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;font-weight:bold;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    {{ $('Code in JavaScript').item.json.numeroOportunidade }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Vendedor:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    {{ $('Code in JavaScript').item.json.nomeVendedor }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Receita Esperada:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:16px;line-height:24px;text-align:left;font-weight:bold;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    R$ {{ $('Code in JavaScript').item.json.expectedRevenue }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-radius:0 0 0 9px;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Status:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-radius:0 0 9px 0;color:#042222;text-align:left;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    <span style=\"display:inline-block;padding:4px 10px;background:#e4eeeb;border:1px solid #cdded8;border-radius:6px;color:#042222;font-size:13px;line-height:20px;font-weight:bold;\">\n                      {{ $('Code in JavaScript').item.json.status }}\n                    </span>\n                  </td>\n                </tr>\n              </table>\n            </td>\n          </tr>\n\n          <tr>\n            <td align=\"center\" bgcolor=\"#042222\" style=\"padding:22px 24px;background:#042222;border-radius:0 0 18px 18px;text-align:center;\">\n              <p style=\"margin:0;color:#ffffff;font-size:13px;line-height:20px;\">Empresa Exemplo</p>\n              <p style=\"margin:4px 0 0;color:#ffffff;font-size:15px;line-height:22px;font-weight:bold;\">Alerta interno</p>\n              <p style=\"margin:12px 0 0;color:#d3e2de;font-size:12px;line-height:19px;\">Telefone: (11) 0000-0000</p>\n              <p style=\"margin:4px 0 0;color:#d3e2de;font-size:12px;line-height:19px;\">Para mais informações, fale com seu gestor.</p>\n            </td>\n          </tr>\n\n        </table>\n\n        <!--[if mso]>\n        </td></tr></table>\n        <![endif]-->\n\n      </td>\n    </tr>\n  </table>\n</div>",
+        "additionalFields": {
+          "ccRecipients": "gerente.comercial@empresa.example,automacoes@empresa.example,registros@empresa.example",
+          "from": "no-reply@empresa.example",
+          "bodyContentType": "html"
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        2128,
+        480
+      ],
+      "id": "8d4ef48f-8124-4c85-8e54-ad88bcda2854",
+      "name": "Send a message3",
+      "webhookId": "78fb3e6f-9403-4eb7-bc4a-705d0ba90582"
+    },
+    {
+      "parameters": {
+        "content": "Notifica o vendedor quando R.O esta para expirar",
+        "height": 272,
+        "width": 310,
+        "color": 3
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        2032,
+        384
+      ],
+      "typeVersion": 1,
+      "id": "bceca107-767e-44d4-b1ac-ceae7cadea4c",
+      "name": "Sticky Note8"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map((item,index)=>{const r=item.json;if(r.error)throw new Error(r.error.data?.message||r.error.message);if(!Array.isArray(r.result))throw new Error('Resposta sem lista result');const ativos=r.result.filter(x=>x.active);if(ativos.length>1)throw new Error('RO duplicada no CRM: revisao necessaria');if(r.result.length&&!ativos.length)throw new Error('RO ja existe arquivada: revisao necessaria');return {json:r,pairedItem:{item:index}};});"
+      },
+      "id": "88454836-779b-4859-af22-076c54951b33",
+      "name": "Validar Odoo - Buscar CRM por R.O",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        944,
+        896
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map((item,index)=>{ const r=item.json; if(r.error) throw new Error('Odoo: '+(r.error.data?.message || r.error.message || 'Erro RPC')); if(!Object.prototype.hasOwnProperty.call(r,'result')) throw new Error('Resposta Odoo sem result'); if(r.result===false) throw new Error('Odoo nao confirmou a operacao'); return {json:r,pairedItem:{item:index}}; });"
+      },
+      "id": "b64d5ae5-deba-4395-aa3d-8e89770001a1",
+      "name": "Validar Odoo - Update crm",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2032,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map((item,index)=>{ const r=item.json; if(r.error) throw new Error('Odoo: '+(r.error.data?.message || r.error.message || 'Erro RPC')); if(!Object.prototype.hasOwnProperty.call(r,'result')) throw new Error('Resposta Odoo sem result'); if(r.result===false) throw new Error('Odoo nao confirmou a operacao'); return {json:r,pairedItem:{item:index}}; });"
+      },
+      "id": "42855fe9-c35f-4c4a-9420-89cd3b69bce2",
+      "name": "Validar Odoo - Criar CRM com partner_name",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3120,
+        1168
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map((item,index)=>{ const r=item.json; if(r.error) throw new Error('Odoo: '+(r.error.data?.message || r.error.message || 'Erro RPC')); if(!Object.prototype.hasOwnProperty.call(r,'result')) throw new Error('Resposta Odoo sem result'); if(r.result===false) throw new Error('Odoo nao confirmou a operacao'); return {json:r,pairedItem:{item:index}}; });"
+      },
+      "id": "6b43bc92-6a1c-441c-9041-83e6ae568f8f",
+      "name": "Validar Odoo - Buscar vendedor1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2752,
+        1168
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "bb19b6fd-4d63-452b-ac88-d008832b1eb5",
+              "leftValue": "={{ $('Code in JavaScript').item.json.isRenovacaoExplicita === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1680,
+        944
+      ],
+      "id": "bcc4bc08-036f-4a48-b302-14171dd7badd",
+      "name": "Tem código REF (renovação)?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://seu-odoo.example.com/jsonrpc",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ (() => { const ref=String($(\"Code in JavaScript\").item.json.roReferencia || \"\"); if(!/^\\d+$/.test(ref)) throw new Error(\"REF invalido\"); return {jsonrpc:\"2.0\",method:\"call\",params:{service:\"object\",method:\"execute_kw\",args:[\"NOME_DO_BANCO_ODOO\",11,$env.ODOO_API_KEY,\"crm.lead\",\"search_read\",[[[\"x_studio_ro_1\",\"=\",ref]]],{fields:[\"id\",\"name\",\"partner_name\",\"x_studio_ro_1\",\"x_studio_qtd_de_renovacoes\",\"user_id\"],order:\"id desc\",limit:1}]},id:1}; })() }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1856,
+        944
+      ],
+      "id": "15c0a28c-e927-41ac-b652-98bf9efd2a9e",
+      "name": "Buscar R.O Referenciado"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map((item,index)=>{ const r=item.json; if(r.error) throw new Error('Odoo: '+(r.error.data?.message || r.error.message || 'Erro RPC')); if(!Object.prototype.hasOwnProperty.call(r,'result')) throw new Error('Resposta Odoo sem result'); if(r.result===false) throw new Error('Odoo nao confirmou a operacao'); return {json:r,pairedItem:{item:index}}; });"
+      },
+      "id": "d922e9a1-efb9-458b-9319-8e25a33bf94f",
+      "name": "Validar Odoo - Buscar R.O Referenciado",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2032,
+        944
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "862c2d43-a56c-4e0f-bbe7-5d8db06a016a",
+              "leftValue": "={{ ($('Buscar R.O Referenciado').item.json.result || []).length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2208,
+        944
+      ],
+      "id": "a9c03944-a975-44d7-b704-0f0ae8e88140",
+      "name": "Encontrou R.O Referenciado?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://seu-odoo.example.com/jsonrpc",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ (() => { const d=$(\"Code in JavaScript\").item.json; const r=($(\"Buscar R.O Referenciado\").item.json.result || [])[0]; if(!r?.id) throw new Error(\"R.O referenciado nao encontrado\"); const ro=String(d.numeroOportunidade || \"\"); if(!/^\\d+$/.test(ro)) throw new Error(\"RO invalida\"); const antigo=String(r.x_studio_ro_1 || \"\"); const v={x_studio_ro_anterior:antigo,x_studio_ro_1:ro,x_studio_qtd_de_renovacoes:(Number(r.x_studio_qtd_de_renovacoes) || 0)+1,x_studio_status_ro_1:\"Ativa\"}; const troca=(s)=>{ if(typeof s!==\"string\" || !s) return s; if(antigo && s.includes(antigo)) return s.split(antigo).join(ro); if(s.includes(ro)) return s; const re=/(R\\.?\\s?O\\.?\\s*)\\d{5,}/i; if(re.test(s)) return s.replace(re,(m,p)=>p+ro); return s+\" | R.O \"+ro; }; const nome=troca(r.name); if(nome && nome!==r.name) v.name=nome; const parceiro=troca(r.partner_name); if(parceiro && parceiro!==r.partner_name) v.partner_name=parceiro; if(d.dataExpiracaoOdoo)v.x_studio_vencimento_de_ro=d.dataExpiracaoOdoo; if(d.lob)v.x_studio_lob=d.lob; return {jsonrpc:\"2.0\",method:\"call\",params:{service:\"object\",method:\"execute_kw\",args:[\"NOME_DO_BANCO_ODOO\",11,$env.ODOO_API_KEY,\"crm.lead\",\"write\",[[r.id],v]]},id:1}; })() }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2384,
+        944
+      ],
+      "id": "91c556c1-6701-4144-a9e4-c57a8b57ae66",
+      "name": "Atualiza R.O (Renovação)"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map((item,index)=>{ const r=item.json; if(r.error) throw new Error('Odoo: '+(r.error.data?.message || r.error.message || 'Erro RPC')); if(!Object.prototype.hasOwnProperty.call(r,'result')) throw new Error('Resposta Odoo sem result'); if(r.result===false) throw new Error('Odoo nao confirmou a operacao'); return {json:r,pairedItem:{item:index}}; });"
+      },
+      "id": "d34451d5-8f2c-4e71-a636-e1fb1dcaf232",
+      "name": "Validar Odoo - Atualiza R.O (Renovação)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2560,
+        944
+      ]
+    },
+    {
+      "parameters": {
+        "toRecipients": "={{ $('Code in JavaScript').item.json.vendedorEmail }}",
+        "subject": "=Renovação de R.O processada: {{ $('Code in JavaScript').item.json.razaoSocial }} | R.O anterior {{ $('Code in JavaScript').item.json.roReferencia }} | Novo R.O {{ $('Code in JavaScript').item.json.numeroOportunidade }}",
+        "bodyContent": "=<div style=\"margin:0;padding:0;background:#f4f5f6;font-family:Arial,Helvetica,sans-serif;\">\n  <table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" style=\"background:#f4f5f6;\">\n    <tr>\n      <td align=\"center\" style=\"padding:24px 12px;\">\n\n        <!--[if mso]>\n        <table role=\"presentation\" width=\"640\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\"><tr><td>\n        <![endif]-->\n\n        <table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" style=\"width:100%;max-width:640px;background:#ffffff;border-radius:18px;border-spacing:0;overflow:hidden;\">\n\n          <tr>\n            <td align=\"center\" style=\"padding:0;font-size:0;line-height:0;border-radius:18px 18px 0 0;\">\n              <img\n                src=\"https://example.com/imagens/banner.png\"\n                alt=\"Empresa Exemplo\"\n                width=\"640\"\n                border=\"0\"\n                style=\"display:block;width:100%;max-width:640px;height:auto;border:0;border-radius:18px 18px 0 0;\"\n              >\n            </td>\n          </tr>\n\n          <tr>\n            <td style=\"padding:30px 24px 32px;\">\n              <h1 style=\"margin:0;color:#042222;font-size:24px;line-height:32px;font-weight:bold;text-align:center;\">\n                Renovação de R.O Processada Automaticamente\n              </h1>\n\n              <p style=\"margin:18px 0 24px;color:#042222;font-size:15px;line-height:24px;text-align:left;\">\n                <strong>{{ $('Code in JavaScript').item.json.nomeVendedor }}</strong>,\n                A renovação foi registrada na oportunidade já existente no CRM (R.O anterior: {{ $('Code in JavaScript').item.json.roReferencia }}). Nenhuma oportunidade nova foi criada.\n              </p>\n\n              <table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" style=\"width:100%;table-layout:fixed;border:1px solid #e2e8e7;border-radius:10px;border-collapse:separate;border-spacing:0;overflow:hidden;text-align:left;\">\n                <tr>\n                  <th scope=\"row\" width=\"32%\" valign=\"top\" style=\"width:32%;padding:16px 12px;background:#f5f8f7;border-radius:9px 0 0 0;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Cliente:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-radius:0 9px 0 0;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    {{ $('Code in JavaScript').item.json.razaoSocial }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    R.O:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;font-weight:bold;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    {{ $('Code in JavaScript').item.json.numeroOportunidade }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Vendedor:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    {{ $('Code in JavaScript').item.json.nomeVendedor }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Receita Esperada:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:16px;line-height:24px;text-align:left;font-weight:bold;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    R$ {{ $('Code in JavaScript').item.json.expectedRevenue }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-radius:0 0 0 9px;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Status:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-radius:0 0 9px 0;color:#042222;text-align:left;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    <span style=\"display:inline-block;padding:4px 10px;background:#e4eeeb;border:1px solid #cdded8;border-radius:6px;color:#042222;font-size:13px;line-height:20px;font-weight:bold;\">\n                      {{ $('Code in JavaScript').item.json.status }}\n                    </span>\n                  </td>\n                </tr>\n              </table>\n            </td>\n          </tr>\n\n          <tr>\n            <td align=\"center\" bgcolor=\"#042222\" style=\"padding:22px 24px;background:#042222;border-radius:0 0 18px 18px;text-align:center;\">\n              <p style=\"margin:0;color:#ffffff;font-size:13px;line-height:20px;\">Empresa Exemplo</p>\n              <p style=\"margin:4px 0 0;color:#ffffff;font-size:15px;line-height:22px;font-weight:bold;\">Alerta interno</p>\n              <p style=\"margin:12px 0 0;color:#d3e2de;font-size:12px;line-height:19px;\">Telefone: (11) 0000-0000</p>\n              <p style=\"margin:4px 0 0;color:#d3e2de;font-size:12px;line-height:19px;\">Para mais informações, fale com seu gestor.</p>\n            </td>\n          </tr>\n\n        </table>\n\n        <!--[if mso]>\n        </td></tr></table>\n        <![endif]-->\n\n      </td>\n    </tr>\n  </table>\n</div>",
+        "additionalFields": {
+          "ccRecipients": "gerente.comercial@empresa.example,automacoes@empresa.example,registros@empresa.example",
+          "from": "no-reply@empresa.example",
+          "bodyContentType": "html"
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        2736,
+        944
+      ],
+      "id": "5c93d0b0-d09a-4e3c-8f75-2fb29523cb8b",
+      "name": "Notifica Renovação Processada",
+      "webhookId": "c2620711-1189-46a7-9054-b5c56912cea3"
+    },
+    {
+      "parameters": {
+        "toRecipients": "automacoes@empresa.example",
+        "subject": "=ATENÇÃO: código REF não encontrado no CRM - {{ $('Code in JavaScript').item.json.nomeCliente }}",
+        "bodyContent": "=<div style=\"margin:0;padding:0;background:#f4f5f6;font-family:Arial,Helvetica,sans-serif;\">\n  <table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" style=\"background:#f4f5f6;\">\n    <tr>\n      <td align=\"center\" style=\"padding:24px 12px;\">\n\n        <!--[if mso]>\n        <table role=\"presentation\" width=\"640\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\"><tr><td>\n        <![endif]-->\n\n        <table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" style=\"width:100%;max-width:640px;background:#ffffff;border-radius:18px;border-spacing:0;overflow:hidden;\">\n\n          <tr>\n            <td align=\"center\" style=\"padding:0;font-size:0;line-height:0;border-radius:18px 18px 0 0;\">\n              <img\n                src=\"https://example.com/imagens/banner.png\"\n                alt=\"Empresa Exemplo\"\n                width=\"640\"\n                border=\"0\"\n                style=\"display:block;width:100%;max-width:640px;height:auto;border:0;border-radius:18px 18px 0 0;\"\n              >\n            </td>\n          </tr>\n\n          <tr>\n            <td style=\"padding:30px 24px 32px;\">\n              <h1 style=\"margin:0;color:#042222;font-size:24px;line-height:32px;font-weight:bold;text-align:center;\">\n                Código de Renovação (REF) Não Encontrado no CRM\n              </h1>\n\n              <p style=\"margin:18px 0 24px;color:#042222;font-size:15px;line-height:24px;text-align:left;\">\n                <strong>{{ $('Code in JavaScript').item.json.nomeVendedor }}</strong>,\n                O código REF:{{ $('Code in JavaScript').item.json.roReferencia }} informado no nome da oportunidade não corresponde a nenhum R.O ativo no CRM. Nenhuma oportunidade foi criada ou atualizada. Confira o número digitado após REF: no registro da Dell e atualize o CRM manualmente.\n              </p>\n\n              <table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" border=\"0\" style=\"width:100%;table-layout:fixed;border:1px solid #e2e8e7;border-radius:10px;border-collapse:separate;border-spacing:0;overflow:hidden;text-align:left;\">\n                <tr>\n                  <th scope=\"row\" width=\"32%\" valign=\"top\" style=\"width:32%;padding:16px 12px;background:#f5f8f7;border-radius:9px 0 0 0;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Cliente:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-radius:0 9px 0 0;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    {{ $('Code in JavaScript').item.json.razaoSocial }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    R.O:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;font-weight:bold;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    {{ $('Code in JavaScript').item.json.numeroOportunidade }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Vendedor:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    {{ $('Code in JavaScript').item.json.nomeVendedor }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Receita Esperada:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#ffffff;border-bottom:1px solid #e2e8e7;color:#042222;font-size:16px;line-height:24px;text-align:left;font-weight:bold;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    R$ {{ $('Code in JavaScript').item.json.expectedRevenue }}\n                  </td>\n                </tr>\n                <tr>\n                  <th scope=\"row\" valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-radius:0 0 0 9px;color:#042222;font-size:14px;line-height:22px;text-align:left;\">\n                    Status:\n                  </th>\n                  <td valign=\"top\" style=\"padding:16px 12px;background:#f5f8f7;border-radius:0 0 9px 0;color:#042222;text-align:left;word-wrap:break-word;overflow-wrap:anywhere;\">\n                    <span style=\"display:inline-block;padding:4px 10px;background:#e4eeeb;border:1px solid #cdded8;border-radius:6px;color:#042222;font-size:13px;line-height:20px;font-weight:bold;\">\n                      {{ $('Code in JavaScript').item.json.status }}\n                    </span>\n                  </td>\n                </tr>\n              </table>\n            </td>\n          </tr>\n\n          <tr>\n            <td align=\"center\" bgcolor=\"#042222\" style=\"padding:22px 24px;background:#042222;border-radius:0 0 18px 18px;text-align:center;\">\n              <p style=\"margin:0;color:#ffffff;font-size:13px;line-height:20px;\">Empresa Exemplo</p>\n              <p style=\"margin:4px 0 0;color:#ffffff;font-size:15px;line-height:22px;font-weight:bold;\">Alerta interno</p>\n              <p style=\"margin:12px 0 0;color:#d3e2de;font-size:12px;line-height:19px;\">Telefone: (11) 0000-0000</p>\n              <p style=\"margin:4px 0 0;color:#d3e2de;font-size:12px;line-height:19px;\">Para mais informações, fale com seu gestor.</p>\n            </td>\n          </tr>\n\n        </table>\n\n        <!--[if mso]>\n        </td></tr></table>\n        <![endif]-->\n\n      </td>\n    </tr>\n  </table>\n</div>",
+        "additionalFields": {
+          "ccRecipients": "gerente.comercial@empresa.example",
+          "from": "no-reply@empresa.example",
+          "bodyContentType": "html"
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        2208,
+        1424
+      ],
+      "id": "3fa853ee-94da-4584-b620-d4e4aedf2445",
+      "name": "Notifica REF Não Encontrado",
+      "webhookId": "928d3ec5-2f1e-414c-a967-3d0f1399e182"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Microsoft Outlook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Status Oportunidade",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Status Oportunidade": {
+      "main": [
+        [
+          {
+            "node": "Buscar CRM por R.O",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar CRM por R.O": {
+      "main": [
+        [
+          {
+            "node": "Validar Odoo - Buscar CRM por R.O",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update crm": {
+      "main": [
+        [
+          {
+            "node": "Validar Odoo - Update crm",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Existe R.O no CRM ?": {
+      "main": [
+        [
+          {
+            "node": "Update crm",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "É atualização sem CRM?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Criar CRM com partner_name": {
+      "main": [
+        [
+          {
+            "node": "Validar Odoo - Criar CRM com partner_name",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar vendedor1": {
+      "main": [
+        [
+          {
+            "node": "Validar Odoo - Buscar vendedor1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a message1": {
+      "main": [
+        [
+          {
+            "node": "No Operation, do nothing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a message2": {
+      "main": [
+        [
+          {
+            "node": "No Operation, do nothing1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a message": {
+      "main": [
+        [
+          {
+            "node": "No Operation, do nothing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a message3": {
+      "main": [
+        [
+          {
+            "node": "No Operation, do nothing1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar Odoo - Buscar CRM por R.O": {
+      "main": [
+        [
+          {
+            "node": "Existe R.O no CRM ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar Odoo - Update crm": {
+      "main": [
+        [
+          {
+            "node": "Send a message2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar Odoo - Criar CRM com partner_name": {
+      "main": [
+        [
+          {
+            "node": "Send a message1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar Odoo - Buscar vendedor1": {
+      "main": [
+        [
+          {
+            "node": "Criar CRM com partner_name",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "É atualização sem CRM?": {
+      "main": [
+        [
+          {
+            "node": "Send a message3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Tem código REF (renovação)?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tem código REF (renovação)?": {
+      "main": [
+        [
+          {
+            "node": "Buscar R.O Referenciado",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Buscar vendedor1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar R.O Referenciado": {
+      "main": [
+        [
+          {
+            "node": "Validar Odoo - Buscar R.O Referenciado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar Odoo - Buscar R.O Referenciado": {
+      "main": [
+        [
+          {
+            "node": "Encontrou R.O Referenciado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Encontrou R.O Referenciado?": {
+      "main": [
+        [
+          {
+            "node": "Atualiza R.O (Renovação)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notifica REF Não Encontrado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Atualiza R.O (Renovação)": {
+      "main": [
+        [
+          {
+            "node": "Validar Odoo - Atualiza R.O (Renovação)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar Odoo - Atualiza R.O (Renovação)": {
+      "main": [
+        [
+          {
+            "node": "Notifica Renovação Processada",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notifica Renovação Processada": {
+      "main": [
+        [
+          {
+            "node": "No Operation, do nothing1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notifica REF Não Encontrado": {
+      "main": [
+        [
+          {
+            "node": "No Operation, do nothing1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "nodeGroups": [],
+  "tags": []
+}
