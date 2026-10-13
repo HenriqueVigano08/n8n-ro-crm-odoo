@@ -63,10 +63,3 @@ Nós utilizados: Microsoft Outlook Trigger · Code · IF · HTTP Request · Micr
 5. No nó **Code in JavaScript**, edite `mapaVendedores` (nome, ID do usuário no Odoo e e-mail) e os IDs das tags de cliente.
 6. Ajuste os campos personalizados (`x_studio_*`) para os nomes usados no seu Odoo.
 7. Os nós **Descobrir Marcador** e **Listas Marcadores** são auxiliares: execute-os uma vez para descobrir os IDs das tags no seu CRM.
-
-## Possíveis melhorias
-
-- Buscar a cotação do dólar em uma API em vez de usar valor fixo.
-- Levar o mapa de vendedores para uma planilha ou tabela do Odoo, para atualizar sem editar o código.
-
-> URLs, banco de dados, pastas, nomes, e-mails, telefone e credenciais foram substituídos por dados fictícios.
